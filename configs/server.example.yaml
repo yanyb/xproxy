@@ -1,5 +1,5 @@
-socks_listen: "127.0.0.1:1080"
-device_listen: "0.0.0.0:8443"
+socks_listen: "0.0.0.0:1080"
+device_listen: "0.0.0.0:443"
 tls_cert: "configs/server.crt"
 tls_key: "configs/server.key"
 socks_password: "secret"
