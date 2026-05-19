@@ -48,8 +48,25 @@ func (s *Server) Listen() error {
 	if err != nil {
 		return err
 	}
-	s.ln = ln
+	s.ln = &lingerListener{Listener: ln}
 	return nil
+}
+
+// lingerListener sets SO_LINGER=0 on accepted SOCKS client connections so close
+// sends RST instead of waiting in FIN_WAIT1 when the peer does not ACK FIN.
+type lingerListener struct {
+	net.Listener
+}
+
+func (l *lingerListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	return c, nil
 }
 
 func (s *Server) Serve() error {

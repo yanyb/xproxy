@@ -11,9 +11,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/hashicorp/yamux"
 	"xproxy/internal/config"
 	"xproxy/internal/protocol"
+
+	"github.com/hashicorp/yamux"
 )
 
 func Run(ctx context.Context, cfg *config.Device, log *log.Logger) error {
