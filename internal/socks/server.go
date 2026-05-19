@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"time"
 	"xproxy/internal/config"
 	"xproxy/internal/tunnel"
 
@@ -52,8 +53,7 @@ func (s *Server) Listen() error {
 	return nil
 }
 
-// lingerListener sets SO_LINGER=0 on accepted SOCKS client connections so close
-// sends RST instead of waiting in FIN_WAIT1 when the peer does not ACK FIN.
+// lingerListener tunes accepted SOCKS client TCP sockets (linger, keepalive).
 type lingerListener struct {
 	net.Listener
 }
@@ -64,9 +64,22 @@ func (l *lingerListener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 	if tc, ok := c.(*net.TCPConn); ok {
-		_ = tc.SetLinger(0)
+		tuneSOCKSClientTCP(tc)
 	}
 	return c, nil
+}
+
+func tuneSOCKSClientTCP(tc *net.TCPConn) {
+	// RST on final Close(), avoids long FIN_WAIT1 when the peer never ACKs FIN.
+	_ = tc.SetLinger(0)
+	// Detect killed clients / expired NAT (e.g. NekoBox force-stopped on Android).
+	_ = tc.SetKeepAlive(true)
+	_ = tc.SetKeepAliveConfig(net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     30 * time.Second,
+		Interval: 10 * time.Second,
+		Count:    3,
+	})
 }
 
 func (s *Server) Serve() error {
