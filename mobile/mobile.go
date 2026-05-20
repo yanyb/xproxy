@@ -24,6 +24,9 @@ type ClientConfig struct {
 	HeartbeatIntervalNs int64
 	ReconnectMinNs      int64
 	ReconnectMaxNs      int64
+	ProxyIdleTimeout    int64
+	MaxConcurrent       int
+	DNSCacheTTL         int64
 }
 
 var (
@@ -158,6 +161,9 @@ func toDeviceConfig(cfg *ClientConfig) (*config.Device, error) {
 		HeartbeatInterval: time.Duration(cfg.HeartbeatIntervalNs),
 		ReconnectMin:      time.Duration(cfg.ReconnectMinNs),
 		ReconnectMax:      time.Duration(cfg.ReconnectMaxNs),
+		ProxyIdleTimeout:  time.Duration(cfg.ProxyIdleTimeout),
+		MaxConcurrent:     cfg.MaxConcurrent,
+		DNSCacheTTL:       time.Duration(cfg.DNSCacheTTL),
 	}
 	if c.HeartbeatInterval == 0 {
 		c.HeartbeatInterval = 10 * time.Second
