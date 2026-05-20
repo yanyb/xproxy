@@ -1,7 +1,6 @@
 package tunnel
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -66,7 +65,7 @@ func Dial(ctx context.Context, o DialOpts, deviceID, network, addr string) (net.
 	}
 	ch := make(chan result, 1)
 	go func() {
-		env, err := protocol.ReadLine(bufio.NewReader(stream))
+		env, err := protocol.ReadLineFromConn(stream)
 		ch <- result{env, err}
 	}()
 

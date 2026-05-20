@@ -13,11 +13,19 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+// deviceRegisterBudget caps TLS handshake + yamux open + register exchange so a
+// half-open client cannot pin a goroutine indefinitely.
+const deviceRegisterBudget = 15 * time.Second
+
 func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *log.Logger) {
 	defer conn.Close()
 
+	// Slowloris guard: close the conn if register doesn't complete in time.
+	registerTimer := time.AfterFunc(deviceRegisterBudget, func() { _ = conn.Close() })
+
 	sess, err := yamux.Server(conn, yamuxCfg())
 	if err != nil {
+		registerTimer.Stop()
 		log.Printf("device yamux: %v", err)
 		return
 	}
@@ -25,6 +33,7 @@ func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *
 
 	stream, err := sess.AcceptStream()
 	if err != nil {
+		registerTimer.Stop()
 		log.Printf("device accept stream: %v", err)
 		return
 	}
@@ -32,13 +41,16 @@ func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *
 	br := bufio.NewReader(stream)
 	first, err := protocol.ReadLine(br)
 	if err != nil || first.Type != protocol.TypeRegister || first.DeviceID == "" {
+		registerTimer.Stop()
 		_ = protocol.WriteLine(stream, &protocol.Envelope{Type: protocol.TypeRegisterAck, OK: false, Message: "register required"})
 		return
 	}
 	id := first.DeviceID
 	if err := protocol.WriteLine(stream, &protocol.Envelope{Type: protocol.TypeRegisterAck, OK: true}); err != nil {
+		registerTimer.Stop()
 		return
 	}
+	registerTimer.Stop()
 
 	reg.Put(id, sess)
 	defer reg.Remove(id, sess)
@@ -98,5 +110,7 @@ func yamuxCfg() *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.EnableKeepAlive = true
 	c.KeepAliveInterval = 30 * time.Second
+	// Cap every yamux write at 10s so a stalled peer can't freeze a relay goroutine.
+	c.ConnectionWriteTimeout = 10 * time.Second
 	return c
 }

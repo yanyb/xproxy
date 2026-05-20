@@ -3,8 +3,11 @@ package protocol
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 )
+
+const maxEnvelopeBytes = 64 * 1024
 
 const (
 	TypeRegister      = "register"
@@ -43,6 +46,31 @@ func ReadLine(r *bufio.Reader) (*Envelope, error) {
 	}
 	if len(line) > 0 && line[len(line)-1] == '\n' {
 		line = line[:len(line)-1]
+	}
+	var env Envelope
+	if err := json.Unmarshal(line, &env); err != nil {
+		return nil, err
+	}
+	return &env, nil
+}
+
+// ReadLineFromConn reads one envelope line byte-by-byte from r so no bytes are
+// buffered past the trailing '\n'. Use when subsequent bytes on the same stream
+// must remain readable by another reader (e.g. after CONNECT ack on a yamux stream).
+func ReadLineFromConn(r io.Reader) (*Envelope, error) {
+	var line []byte
+	var buf [1]byte
+	for {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return nil, err
+		}
+		if buf[0] == '\n' {
+			break
+		}
+		line = append(line, buf[0])
+		if len(line) > maxEnvelopeBytes {
+			return nil, errors.New("envelope too long")
+		}
 	}
 	var env Envelope
 	if err := json.Unmarshal(line, &env); err != nil {
