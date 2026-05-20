@@ -6,3 +6,5 @@ socks_password: "secret"
 device_wait: 30s
 connect_wait: 30s
 heartbeat_ttl: 90s
+# max idle per relay read/write on SOCKS connections (avoids stuck io.Copy)
+proxy_idle_timeout: 30s

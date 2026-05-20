@@ -14,8 +14,9 @@ type Server struct {
 	TLSKey        string        `yaml:"tls_key"`
 	SocksPassword string        `yaml:"socks_password"`
 	DeviceWait    time.Duration `yaml:"device_wait"`
-	ConnectWait   time.Duration `yaml:"connect_wait"`
-	HeartbeatTTL  time.Duration `yaml:"heartbeat_ttl"`
+	ConnectWait      time.Duration `yaml:"connect_wait"`
+	HeartbeatTTL     time.Duration `yaml:"heartbeat_ttl"`
+	ProxyIdleTimeout time.Duration `yaml:"proxy_idle_timeout"`
 }
 
 type Device struct {
@@ -36,6 +37,9 @@ func LoadServer(path string) (*Server, error) {
 	}
 	if c.ConnectWait == 0 {
 		c.ConnectWait = 30 * time.Second
+	}
+	if c.ProxyIdleTimeout == 0 {
+		c.ProxyIdleTimeout = 2 * time.Minute
 	}
 	return &c, nil
 }

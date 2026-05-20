@@ -28,6 +28,7 @@ func New(cfg *config.Server, reg *tunnel.Registry, log *log.Logger) *Server {
 	opts := []socks5.Option{
 		socks5.WithLogger(socks5.NewLogger(log)),
 		socks5.WithRule(&socks5.PermitCommand{EnableConnect: true}),
+		socks5.WithProxyIdleTimeout(cfg.ProxyIdleTimeout),
 		socks5.WithDialAndRequest(func(ctx context.Context, network, addr string, req *socks5.Request) (net.Conn, error) {
 			deviceID, err := reg.ResolveDevice(username(req))
 			if err != nil {
