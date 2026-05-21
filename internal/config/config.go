@@ -47,13 +47,10 @@ func LoadServer(path string) (*Server, error) {
 		c.ConnectWait = 30 * time.Second
 	}
 	if c.ProxyIdleTimeout == 0 {
-		c.ProxyIdleTimeout = 30 * time.Second
+		c.ProxyIdleTimeout = 60 * time.Second
 	}
 	if c.HeartbeatTTL == 0 {
 		c.HeartbeatTTL = 90 * time.Second
-	}
-	if c.ProxyIdleTimeout == 0 {
-		c.ProxyIdleTimeout = 30
 	}
 	return &c, nil
 }
@@ -73,7 +70,7 @@ func LoadDevice(path string) (*Device, error) {
 		c.ReconnectMax = 60 * time.Second
 	}
 	if c.ProxyIdleTimeout == 0 {
-		c.ProxyIdleTimeout = 30 * time.Second
+		c.ProxyIdleTimeout = 60 * time.Second
 	}
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = 128

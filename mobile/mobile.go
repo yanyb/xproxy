@@ -178,7 +178,7 @@ func toDeviceConfig(cfg *ClientConfig) (*config.Device, error) {
 		c.ReconnectMax = c.ReconnectMin
 	}
 	if c.ProxyIdleTimeout == 0 {
-		c.ProxyIdleTimeout = 30 * time.Second
+		c.ProxyIdleTimeout = 60 * time.Second
 	}
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = 128

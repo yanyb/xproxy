@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -211,10 +212,14 @@ func (sf *Server) handleConnect(ctx context.Context, writer io.Writer, request *
 		return err
 	}
 
-	// Start proxying (both directions must finish; idle timeout per read/write).
+	// Start proxying (both directions must finish). Idle timeout is shared
+	// between the two directions: as long as either side moves bytes the
+	// other side stays alive. This avoids killing requests that are silent
+	// on one direction (e.g. client just waiting for a slow HTTP response).
+	act := newRelayActivity()
 	errCh := make(chan error, 2)
-	sf.goFunc(func() { errCh <- sf.Proxy(ctx, target, request.Reader, request.TCPConn) })
-	sf.goFunc(func() { errCh <- sf.Proxy(ctx, writer, target, target) })
+	sf.goFunc(func() { errCh <- sf.Proxy(ctx, target, request.Reader, request.TCPConn, act) })
+	sf.goFunc(func() { errCh <- sf.Proxy(ctx, writer, target, target, act) })
 	var firstErr error
 	for i := 0; i < 2; i++ {
 		if e := <-errCh; e != nil && firstErr == nil {
@@ -445,16 +450,49 @@ func addrString(addr net.Addr) string {
 	return addr.String()
 }
 
+// relayActivity tracks the most recent moment when ANY direction of a
+// bidirectional relay saw bytes flow. Both halves of the relay share one
+// instance so that traffic on one side keeps the other side from being
+// timed out (e.g. an HTTP request that is silent on the upload direction
+// while the server is busy producing the response on the download side).
+type relayActivity struct {
+	lastUnixNano atomic.Int64
+}
+
+func newRelayActivity() *relayActivity {
+	a := &relayActivity{}
+	a.touch()
+	return a
+}
+
+func (a *relayActivity) touch() {
+	a.lastUnixNano.Store(time.Now().UnixNano())
+}
+
+func (a *relayActivity) idleFor() time.Duration {
+	return time.Since(time.Unix(0, a.lastUnixNano.Load()))
+}
+
+func isTimeoutErr(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
+	}
+	return false
+}
+
 // Proxy relays src to dst. readTCP sets read deadlines when src is a buffered
-// client reader. ctx carries per-request uid/dst for log correlation; it is
-// not used for cancellation here (relay lifetime is bounded by idle timeout).
-func (sf *Server) Proxy(ctx context.Context, dst io.Writer, src io.Reader, readTCP net.Conn) error {
+// client reader. act, when non-nil, is shared between both directions of a
+// CONNECT relay so the idle timeout fires only when BOTH directions have been
+// silent for `proxyIdleTimeout` (HAProxy/envoy-style combined idle).
+// ctx carries per-request uid/dst for log correlation only.
+func (sf *Server) Proxy(ctx context.Context, dst io.Writer, src io.Reader, readTCP net.Conn, act *relayActivity) error {
 	buf := sf.bufferPool.Get()
 	defer sf.bufferPool.Put(buf)
 
 	var err error
 	if sf.proxyIdleTimeout > 0 {
-		err = sf.proxyTransfer(ctx, dst, src, readTCP, buf[:cap(buf)])
+		err = sf.proxyTransfer(ctx, dst, src, readTCP, buf[:cap(buf)], act)
 	} else {
 		_, err = io.CopyBuffer(dst, src, buf[:cap(buf)])
 	}
@@ -464,8 +502,19 @@ func (sf *Server) Proxy(ctx context.Context, dst io.Writer, src io.Reader, readT
 	return err
 }
 
-func (sf *Server) proxyTransfer(ctx context.Context, dst io.Writer, src io.Reader, readTCP net.Conn, buf []byte) error {
+func (sf *Server) proxyTransfer(ctx context.Context, dst io.Writer, src io.Reader, readTCP net.Conn, buf []byte, act *relayActivity) error {
 	idle := sf.proxyIdleTimeout
+	// We poll with a shorter read deadline so the "other direction had
+	// traffic recently" check (via act) gets a chance to run before we
+	// give up. tick is bounded so very small/large idle values stay sane.
+	tick := idle / 4
+	if tick > 15*time.Second {
+		tick = 15 * time.Second
+	}
+	if tick < time.Second {
+		tick = time.Second
+	}
+
 	dstTCP, _ := dst.(net.Conn)
 
 	clearDeadline := func() {
@@ -479,16 +528,19 @@ func (sf *Server) proxyTransfer(ctx context.Context, dst io.Writer, src io.Reade
 	defer clearDeadline()
 
 	for {
-		deadline := time.Now().Add(idle)
+		readDeadline := time.Now().Add(tick)
 		if readTCP != nil {
-			_ = readTCP.SetReadDeadline(deadline)
+			_ = readTCP.SetReadDeadline(readDeadline)
 		} else if c, ok := src.(net.Conn); ok {
-			_ = c.SetReadDeadline(deadline)
+			_ = c.SetReadDeadline(readDeadline)
 		}
 		nr, err := src.Read(buf)
 		if nr > 0 {
+			if act != nil {
+				act.touch()
+			}
 			if dstTCP != nil {
-				_ = dstTCP.SetWriteDeadline(deadline)
+				_ = dstTCP.SetWriteDeadline(time.Now().Add(idle))
 			}
 			if _, werr := dst.Write(buf[:nr]); werr != nil {
 				sf.logger.Errorf(logPrefix(ctx)+"write to dst %v", werr)
@@ -499,7 +551,17 @@ func (sf *Server) proxyTransfer(ctx context.Context, dst io.Writer, src io.Reade
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			sf.logger.Errorf(logPrefix(ctx)+"read from src %v", err)
+			// A read timeout here might just be our own polling tick. If
+			// the OTHER direction is still active we keep going; only the
+			// combined silence of both sides exceeding idle is fatal.
+			if isTimeoutErr(err) && act != nil && act.idleFor() <= idle {
+				continue
+			}
+			if isTimeoutErr(err) {
+				sf.logger.Errorf(logPrefix(ctx)+"relay idle timeout after %s", idle)
+			} else {
+				sf.logger.Errorf(logPrefix(ctx)+"read from src %v", err)
+			}
 			return err
 		}
 	}

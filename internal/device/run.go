@@ -317,14 +317,18 @@ func handleConnect(ctx context.Context, stream net.Conn, lookup HostLookup, rela
 		return
 	}
 
+	// Shared idle clock: bytes on either direction keep the OTHER direction
+	// alive too. Avoids killing a request whose client side is idle while
+	// the target is still streaming the response back (or vice versa).
+	act := newRelayActivity()
 	errCh := make(chan error, 2)
 	go func() {
 		defer closeTarget()
-		errCh <- relayCopy(target, br, stream, relayIdle)
+		errCh <- relayCopy(target, br, stream, relayIdle, act)
 	}()
 	go func() {
 		defer closeTarget()
-		errCh <- relayCopy(stream, target, target, relayIdle)
+		errCh <- relayCopy(stream, target, target, relayIdle, act)
 	}()
 	for i := 0; i < 2; i++ {
 		<-errCh
