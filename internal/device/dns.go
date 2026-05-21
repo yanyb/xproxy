@@ -35,6 +35,10 @@ func tuneOutboundTCP(c net.Conn) {
 	}
 	// RST on Close so we don't pile FIN_WAIT1 sockets when the target / network dies.
 	_ = tc.SetLinger(0)
+	// Disable Nagle: most relayed traffic is interactive (HTTP requests,
+	// TLS handshakes, etc.). Batching small writes adds noticeable latency
+	// without saving meaningful bandwidth at our typical packet sizes.
+	_ = tc.SetNoDelay(true)
 	// Detect half-open peer (broken Wi-Fi, dead NAT, peer killed) without waiting for
 	// the relay idle timeout to expire.
 	_ = tc.SetKeepAlive(true)

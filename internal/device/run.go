@@ -86,6 +86,10 @@ func session(ctx context.Context, cfg *config.Device, log *log.Logger, opts *Opt
 	// Bound every yamux-stream write (incl. CONNECT_ACK, heartbeats) so a frozen
 	// uplink can't pin a goroutine waiting for an ACK frame forever.
 	yc.ConnectionWriteTimeout = 10 * time.Second
+	// Default 256KB caps per-stream throughput at BDP. With 100ms RTT
+	// to a 10Mbps target the default already saturates; 4MB leaves headroom
+	// for low-RTT high-throughput targets (e.g. cellular 5G ~50ms / 200Mbps).
+	yc.MaxStreamWindowSize = 4 * 1024 * 1024
 	sess, err := yamux.Client(conn, yc)
 	if err != nil {
 		registerTimer.Stop()
@@ -188,7 +192,38 @@ func dialTLS(ctx context.Context, addr string, lookup HostLookup) (net.Conn, err
 func dialTLSOne(ctx context.Context, d *tls.Dialer, addr string) (net.Conn, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, tlsDialAttemptTimeout)
 	defer cancel()
-	return d.DialContext(attemptCtx, "tcp", addr)
+	conn, err := d.DialContext(attemptCtx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tuneTunnelTCP(conn)
+	return conn, nil
+}
+
+// tuneTunnelTCP unwraps a *tls.Conn to reach the underlying *net.TCPConn and
+// applies socket options that are particularly important for the yamux
+// carrier: NoDelay so window-update / keepalive / heartbeat frames don't get
+// stuck behind Nagle, and TCP keepalive as a low-level liveness check
+// independent of the app-level yamux keepalive.
+func tuneTunnelTCP(c net.Conn) {
+	type netConner interface{ NetConn() net.Conn }
+	var tc *net.TCPConn
+	if nc, ok := c.(netConner); ok {
+		tc, _ = nc.NetConn().(*net.TCPConn)
+	} else {
+		tc, _ = c.(*net.TCPConn)
+	}
+	if tc == nil {
+		return
+	}
+	_ = tc.SetNoDelay(true)
+	_ = tc.SetKeepAlive(true)
+	_ = tc.SetKeepAliveConfig(net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     30 * time.Second,
+		Interval: 10 * time.Second,
+		Count:    3,
+	})
 }
 
 func heartbeatLoop(ctx context.Context, stream net.Conn, br *bufio.Reader, every time.Duration, netType func() string) error {

@@ -149,6 +149,10 @@ func (c *semConn) Close() error {
 func tuneSOCKSClientTCP(tc *net.TCPConn) {
 	// RST on final Close(), avoids long FIN_WAIT1 when the peer never ACKs FIN.
 	_ = tc.SetLinger(0)
+	// Disable Nagle: SOCKS5 handshake is a sequence of tiny (2-23B) packets
+	// that ping-pong with the client. Nagle would inject ~40ms of latency
+	// per small write while waiting for the previous ACK.
+	_ = tc.SetNoDelay(true)
 	// Detect killed clients / expired NAT (e.g. NekoBox force-stopped on Android).
 	_ = tc.SetKeepAlive(true)
 	_ = tc.SetKeepAliveConfig(net.KeepAliveConfig{

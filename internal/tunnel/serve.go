@@ -20,6 +20,8 @@ const deviceRegisterBudget = 15 * time.Second
 func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *xlog.Logger) {
 	defer conn.Close()
 
+	tuneCarrierTCP(conn)
+
 	// Slowloris guard: close the conn if register doesn't complete in time.
 	registerTimer := time.AfterFunc(deviceRegisterBudget, func() { _ = conn.Close() })
 
@@ -106,11 +108,40 @@ func watchHeartbeat(ctx context.Context, conn net.Conn, ttl time.Duration, mu *s
 	}
 }
 
+// tuneCarrierTCP unwraps a *tls.Conn (or anything exposing NetConn()) down to
+// the *net.TCPConn and applies socket options that matter for the yamux
+// carrier: NoDelay (so small control / heartbeat frames aren't held back by
+// Nagle) and TCP keepalive (low-level liveness check independent of yamux's
+// own app-level keepalive).
+func tuneCarrierTCP(c net.Conn) {
+	type netConner interface{ NetConn() net.Conn }
+	var tc *net.TCPConn
+	if nc, ok := c.(netConner); ok {
+		tc, _ = nc.NetConn().(*net.TCPConn)
+	} else {
+		tc, _ = c.(*net.TCPConn)
+	}
+	if tc == nil {
+		return
+	}
+	_ = tc.SetNoDelay(true)
+	_ = tc.SetKeepAlive(true)
+	_ = tc.SetKeepAliveConfig(net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     30 * time.Second,
+		Interval: 10 * time.Second,
+		Count:    3,
+	})
+}
+
 func yamuxCfg() *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.EnableKeepAlive = true
 	c.KeepAliveInterval = 30 * time.Second
 	// Cap every yamux write at 10s so a stalled peer can't freeze a relay goroutine.
 	c.ConnectionWriteTimeout = 10 * time.Second
+	// Match the phone side (run.go). Default 256KB throttles per-stream
+	// throughput on high BDP links; 4MB gives headroom without burning RAM.
+	c.MaxStreamWindowSize = 4 * 1024 * 1024
 	return c
 }
