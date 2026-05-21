@@ -10,8 +10,54 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/things-go/go-socks5/statute"
 )
+
+// ctxKey is an unexported type for per-request context keys. Using an
+// unexported type prevents accidental collisions with keys set by other
+// packages (resolvers, middlewares, etc.).
+type ctxKey int
+
+const (
+	ctxKeyUID ctxKey = iota
+	ctxKeyDst
+)
+
+// withRequestID attaches a fresh request id (uid) and the current destination
+// string (dst) to ctx. Used by logErrf to tag each log line so the lifecycle
+// of a single SOCKS request can be followed end-to-end.
+func withRequestID(ctx context.Context, dst string) context.Context {
+	ctx = context.WithValue(ctx, ctxKeyUID, uuid.New().String())
+	ctx = context.WithValue(ctx, ctxKeyDst, dst)
+	return ctx
+}
+
+// withDst refreshes the dst tag on ctx, preserving the uid. Call after an
+// address rewrite changes the final destination.
+func withDst(ctx context.Context, dst string) context.Context {
+	return context.WithValue(ctx, ctxKeyDst, dst)
+}
+
+// logPrefix renders the uid/dst stored on ctx as a short log prefix like
+// "[uid=ab12... dst=example.com:443] ". Returns "" if neither value is set.
+func logPrefix(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	uid, _ := ctx.Value(ctxKeyUID).(string)
+	dst, _ := ctx.Value(ctxKeyDst).(string)
+	if uid == "" && dst == "" {
+		return ""
+	}
+	return fmt.Sprintf("[uid=%s dst=%s] ", uid, dst)
+}
+
+// logErrf logs an Errorf with the per-request correlation prefix from ctx.
+// Safe to call with a context that doesn't yet carry uid/dst (prefix is empty).
+func (sf *Server) logErrf(ctx context.Context, format string, args ...interface{}) {
+	sf.logger.Errorf(logPrefix(ctx)+format, args...)
+}
 
 // AddressRewriter is used to rewrite a destination transparently
 type AddressRewriter interface {
@@ -54,16 +100,22 @@ func ParseRequest(bufConn io.Reader) (*Request, error) {
 func (sf *Server) handleRequest(write io.Writer, req *Request) error {
 	var err error
 
-	ctx := context.Background()
+	// Tag the request as early as possible so every subsequent log line shares
+	// the same uid. dst starts as the raw client request and gets refreshed
+	// after FQDN resolve / rewrite.
+	ctx := withRequestID(context.Background(), req.RawDestAddr.String())
+
 	// Resolve the address if we have a FQDN
 	dest := req.RawDestAddr
 	if dest.FQDN != "" {
 		ctx, dest.IP, err = sf.resolver.Resolve(ctx, dest.FQDN)
 		if err != nil {
 			if err := SendReply(write, statute.RepHostUnreachable, nil); err != nil {
-				return fmt.Errorf("failed to send reply, %v", err)
+				sf.logErrf(ctx, "failed to send reply, %v", err)
+				return err
 			}
-			return fmt.Errorf("failed to resolve destination[%v], %v", dest.FQDN, err)
+			sf.logErrf(ctx, "failed to resolve destination[%v], %v", dest.FQDN, err)
+			return err
 		}
 	}
 
@@ -72,14 +124,18 @@ func (sf *Server) handleRequest(write io.Writer, req *Request) error {
 	if sf.rewriter != nil {
 		ctx, req.DestAddr = sf.rewriter.Rewrite(ctx, req)
 	}
+	// Refresh dst now that the final destination is known (post-resolve + post-rewrite).
+	ctx = withDst(ctx, req.DestAddr.String())
 
 	// Check if this is allowed
 	var ok bool
 	ctx, ok = sf.rules.Allow(ctx, req)
 	if !ok {
 		if err := SendReply(write, statute.RepRuleFailure, nil); err != nil {
-			return fmt.Errorf("failed to send reply, %v", err)
+			sf.logErrf(ctx, "failed to send reply, %v", err)
+			return err
 		}
+		sf.logErrf(ctx, "bind to %v blocked by rules", req.RawDestAddr)
 		return fmt.Errorf("bind to %v blocked by rules", req.RawDestAddr)
 	}
 
@@ -112,8 +168,10 @@ func (sf *Server) handleRequest(write io.Writer, req *Request) error {
 		}
 	default:
 		if err := SendReply(write, statute.RepCommandNotSupported, nil); err != nil {
-			return fmt.Errorf("failed to send reply, %v", err)
+			sf.logErrf(ctx, "failed to send reply, %v", err)
+			return err
 		}
+		sf.logErrf(ctx, "unsupported command[%v]", req.Command)
 		return fmt.Errorf("unsupported command[%v]", req.Command)
 	}
 	return last(ctx, write, req)
@@ -145,21 +203,24 @@ func (sf *Server) handleConnect(ctx context.Context, writer io.Writer, request *
 			resp = statute.RepNetworkUnreachable
 		}
 		if err := SendReply(writer, resp, nil); err != nil {
-			return fmt.Errorf("failed to send reply, %v", err)
+			sf.logErrf(ctx, "failed to send reply, %v", err)
+			return err
 		}
-		return fmt.Errorf("connect to %v failed, %v", request.RawDestAddr, err)
+		sf.logErrf(ctx, "connect to %v failed, %v", request.RawDestAddr, err)
+		return err
 	}
 	defer target.Close() // nolint: errcheck
 
 	// Send success
 	if err := SendReply(writer, statute.RepSuccess, target.LocalAddr()); err != nil {
-		return fmt.Errorf("failed to send reply, %v", err)
+		sf.logErrf(ctx, "failed to send reply, %v", err)
+		return err
 	}
 
 	// Start proxying (both directions must finish; idle timeout per read/write).
 	errCh := make(chan error, 2)
-	sf.goFunc(func() { errCh <- sf.Proxy(target, request.Reader, request.TCPConn) })
-	sf.goFunc(func() { errCh <- sf.Proxy(writer, target, target) })
+	sf.goFunc(func() { errCh <- sf.Proxy(ctx, target, request.Reader, request.TCPConn) })
+	sf.goFunc(func() { errCh <- sf.Proxy(ctx, writer, target, target) })
 	var firstErr error
 	for i := 0; i < 2; i++ {
 		if e := <-errCh; e != nil && firstErr == nil {
@@ -170,10 +231,11 @@ func (sf *Server) handleConnect(ctx context.Context, writer io.Writer, request *
 }
 
 // handleBind is used to handle a connect command
-func (sf *Server) handleBind(_ context.Context, writer io.Writer, _ *Request) error {
+func (sf *Server) handleBind(ctx context.Context, writer io.Writer, _ *Request) error {
 	// TODO: Support bind
 	if err := SendReply(writer, statute.RepCommandNotSupported, nil); err != nil {
-		return fmt.Errorf("failed to send reply: %v", err)
+		sf.logErrf(ctx, "failed to send reply: %v", err)
+		return err
 	}
 	return nil
 }
@@ -195,17 +257,21 @@ func (sf *Server) handleAssociate(ctx context.Context, writer io.Writer, request
 			udpAddr, err = net.ResolveUDPAddr("udp", sf.bindIP.String()+":0")
 			if err != nil {
 				if err := SendReply(writer, statute.RepServerFailure, nil); err != nil {
-					return fmt.Errorf("failed to send reply, %v", err)
+					sf.logErrf(ctx, "failed to send reply, %v", err)
+					return err
 				}
-				return fmt.Errorf("failed to resolve udp addr, %v", err)
+				sf.logErrf(ctx, "failed to resolve udp addr, %v", err)
+				return err
 			}
 		}
 	} else {
 		tcpAddr, ok := request.LocalAddr.(*net.TCPAddr)
 		if !ok {
 			if err := SendReply(writer, statute.RepServerFailure, nil); err != nil {
-				return fmt.Errorf("failed to send reply, %v", err)
+				sf.logErrf(ctx, "failed to send reply, %v", err)
+				return err
 			}
+			sf.logErrf(ctx, "local address is not TCP: %T", request.LocalAddr)
 			return fmt.Errorf("local address is not TCP: %T", request.LocalAddr)
 		}
 		udpAddr = &net.UDPAddr{IP: tcpAddr.IP, Port: 0}
@@ -213,15 +279,18 @@ func (sf *Server) handleAssociate(ctx context.Context, writer io.Writer, request
 	bindLn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		if err := SendReply(writer, statute.RepServerFailure, nil); err != nil {
-			return fmt.Errorf("failed to send reply, %v", err)
+			sf.logErrf(ctx, "failed to send reply, %v", err)
+			return err
 		}
-		return fmt.Errorf("listen udp failed, %v", err)
+		sf.logErrf(ctx, "listen udp failed, %v", err)
+		return err
 	}
 
-	sf.logger.Errorf("client want to used addr %v, listen addr: %s", request.DestAddr, bindLn.LocalAddr())
+	sf.logErrf(ctx, "client want to used addr %v, listen addr: %s", request.DestAddr, bindLn.LocalAddr())
 	// send BND.ADDR and BND.PORT, client used
 	if err = SendReply(writer, statute.RepSuccess, bindLn.LocalAddr()); err != nil {
-		return fmt.Errorf("failed to send reply, %v", err)
+		sf.logErrf(ctx, "failed to send reply, %v", err)
+		return err
 	}
 
 	sf.goFunc(func() {
@@ -233,7 +302,7 @@ func (sf *Server) handleAssociate(ctx context.Context, writer io.Writer, request
 			bindLn.Close() // nolint: errcheck
 			conns.Range(func(key, value any) bool {
 				if connTarget, ok := value.(net.Conn); !ok {
-					sf.logger.Errorf("conns has illegal item %v:%v", key, value)
+					sf.logErrf(ctx, "conns has illegal item %v:%v", key, value)
 				} else {
 					connTarget.Close() // nolint: errcheck
 				}
@@ -265,7 +334,7 @@ func (sf *Server) handleAssociate(ctx context.Context, writer io.Writer, request
 				// if the 'connection' doesn't exist, create one and store it
 				targetNew, err := dial(ctx, "udp", pk.DstAddr.String())
 				if err != nil {
-					sf.logger.Errorf("connect to %v failed, %v", pk.DstAddr, err)
+					sf.logErrf(ctx, "connect to %v failed, %v", pk.DstAddr, err)
 					// TODO:continue or return Error?
 					continue
 				}
@@ -286,7 +355,7 @@ func (sf *Server) handleAssociate(ctx context.Context, writer io.Writer, request
 							if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 								return
 							}
-							sf.logger.Errorf("read data from remote %s failed, %v", addrString(targetNew.RemoteAddr()), err)
+							sf.logErrf(ctx, "read data from remote %s failed, %v", addrString(targetNew.RemoteAddr()), err)
 							return
 						}
 						tmpBufPool := sf.bufferPool.Get()
@@ -295,24 +364,24 @@ func (sf *Server) handleAssociate(ctx context.Context, writer io.Writer, request
 						proBuf = append(proBuf, buf[:n]...)
 						if _, err := bindLn.WriteTo(proBuf, srcAddr); err != nil {
 							sf.bufferPool.Put(tmpBufPool)
-							sf.logger.Errorf("write data to client %s failed, %v", srcAddr, err)
+							sf.logErrf(ctx, "write data to client %s failed, %v", srcAddr, err)
 							return
 						}
 						sf.bufferPool.Put(tmpBufPool)
 					}
 				})
 				if _, err := targetNew.Write(pk.Data); err != nil {
-					sf.logger.Errorf("write data to remote server %s failed, %v", addrString(targetNew.RemoteAddr()), err)
+					sf.logErrf(ctx, "write data to remote server %s failed, %v", addrString(targetNew.RemoteAddr()), err)
 					return
 				}
 			} else {
 				conn, ok := target.(net.Conn)
 				if !ok {
-					sf.logger.Errorf("invalid connection type in pool: %T", target)
+					sf.logErrf(ctx, "invalid connection type in pool: %T", target)
 					return
 				}
 				if _, err := conn.Write(pk.Data); err != nil {
-					sf.logger.Errorf("write data to remote server %s failed, %v", addrString(conn.RemoteAddr()), err)
+					sf.logErrf(ctx, "write data to remote server %s failed, %v", addrString(conn.RemoteAddr()), err)
 					return
 				}
 			}
@@ -382,14 +451,16 @@ func addrString(addr net.Addr) string {
 	return addr.String()
 }
 
-// Proxy relays src to dst. readTCP sets read deadlines when src is a buffered client reader.
-func (sf *Server) Proxy(dst io.Writer, src io.Reader, readTCP net.Conn) error {
+// Proxy relays src to dst. readTCP sets read deadlines when src is a buffered
+// client reader. ctx carries per-request uid/dst for log correlation; it is
+// not used for cancellation here (relay lifetime is bounded by idle timeout).
+func (sf *Server) Proxy(ctx context.Context, dst io.Writer, src io.Reader, readTCP net.Conn) error {
 	buf := sf.bufferPool.Get()
 	defer sf.bufferPool.Put(buf)
 
 	var err error
 	if sf.proxyIdleTimeout > 0 {
-		err = sf.proxyTransfer(dst, src, readTCP, buf[:cap(buf)])
+		err = sf.proxyTransfer(ctx, dst, src, readTCP, buf[:cap(buf)])
 	} else {
 		_, err = io.CopyBuffer(dst, src, buf[:cap(buf)])
 	}
@@ -399,7 +470,7 @@ func (sf *Server) Proxy(dst io.Writer, src io.Reader, readTCP net.Conn) error {
 	return err
 }
 
-func (sf *Server) proxyTransfer(dst io.Writer, src io.Reader, readTCP net.Conn, buf []byte) error {
+func (sf *Server) proxyTransfer(ctx context.Context, dst io.Writer, src io.Reader, readTCP net.Conn, buf []byte) error {
 	idle := sf.proxyIdleTimeout
 	dstTCP, _ := dst.(net.Conn)
 
@@ -426,6 +497,7 @@ func (sf *Server) proxyTransfer(dst io.Writer, src io.Reader, readTCP net.Conn, 
 				_ = dstTCP.SetWriteDeadline(deadline)
 			}
 			if _, werr := dst.Write(buf[:nr]); werr != nil {
+				sf.logErrf(ctx, "write to dst %v", werr)
 				return werr
 			}
 		}
@@ -433,6 +505,7 @@ func (sf *Server) proxyTransfer(dst io.Writer, src io.Reader, readTCP net.Conn, 
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+			sf.logErrf(ctx, "read from src %v", err)
 			return err
 		}
 	}

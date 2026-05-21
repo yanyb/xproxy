@@ -122,9 +122,7 @@ func (sf *Server) Serve(l net.Listener) error {
 			return err
 		}
 		sf.goFunc(func() {
-			if err := sf.ServeConn(conn); err != nil {
-				sf.logger.Errorf("server: %v", err)
-			}
+			_ = sf.ServeConn(conn)
 		})
 	}
 }
@@ -152,7 +150,8 @@ func (sf *Server) ServeConn(conn net.Conn) error {
 	}
 	authContext, err = sf.authenticate(conn, bufConn, userAddr, mr.Methods)
 	if err != nil {
-		return fmt.Errorf("failed to authenticate: %w", err)
+		sf.logger.Errorf("failed to authenticate: %w", err)
+		return err
 	}
 
 	// The client request detail
@@ -160,18 +159,22 @@ func (sf *Server) ServeConn(conn net.Conn) error {
 	if err != nil {
 		if errors.Is(err, statute.ErrUnrecognizedAddrType) {
 			if err := SendReply(conn, statute.RepAddrTypeNotSupported, nil); err != nil {
-				return fmt.Errorf("failed to send reply %w", err)
+				sf.logger.Errorf("failed to send reply %w", err)
+				return err
 			}
 		}
-		return fmt.Errorf("failed to read destination address, %w", err)
+		sf.logger.Errorf("failed to read destination address, %w", err)
+		return err
 	}
 
 	if request.Request.Command != statute.CommandConnect && // nolint: staticcheck
 		request.Request.Command != statute.CommandBind && // nolint: staticcheck
 		request.Request.Command != statute.CommandAssociate { // nolint: staticcheck
 		if err := SendReply(conn, statute.RepCommandNotSupported, nil); err != nil {
-			return fmt.Errorf("failed to send reply, %v", err)
+			sf.logger.Errorf("failed to send reply, %v", err)
+			return err
 		}
+		sf.logger.Errorf("unrecognized command[%d]", request.Request.Command)
 		return fmt.Errorf("unrecognized command[%d]", request.Request.Command) // nolint: staticcheck
 	}
 
