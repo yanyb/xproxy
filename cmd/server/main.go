@@ -7,15 +7,14 @@ import (
 	"flag"
 	"log"
 	"net"
-	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
-
 	"xproxy/internal/config"
 	"xproxy/internal/socks"
 	"xproxy/internal/tunnel"
+	"xproxy/internal/xlog"
 )
 
 func main() {
@@ -27,7 +26,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	logger := log.New(os.Stdout, "server ", log.LstdFlags)
+	logger, err := xlog.New(cfg.Log)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -60,7 +63,7 @@ func main() {
 				if errors.Is(err, net.ErrClosed) {
 					return
 				}
-				logger.Printf("device accept: %v", err)
+				logger.Errorf("device accept: %v", err)
 				return
 			}
 			wg.Add(1)
@@ -75,11 +78,11 @@ func main() {
 	go func() {
 		defer wg.Done()
 		if err := socksSrv.Serve(); err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Printf("socks: %v", err)
+			logger.Errorf("socks: %v", err)
 		}
 	}()
 
-	logger.Printf("socks=%s device_tls=%s", cfg.SocksListen, cfg.DeviceListen)
+	logger.Infof("socks=%s device_tls=%s", cfg.SocksListen, cfg.DeviceListen)
 
 	<-ctx.Done()
 	_ = devLn.Close()

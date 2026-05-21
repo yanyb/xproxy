@@ -10,3 +10,10 @@ proxy_idle_timeout: 30s
 socks_local_resolve: false
 max_clients: 30000
 max_clients_per_device: 32
+log:
+  level: info
+  file_path: logs/xproxy.log
+  max_size: 1024
+  max_backups: 3
+  max_age: 7
+  compress: true

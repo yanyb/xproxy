@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"time"
+	"xproxy/internal/xlog"
 
 	"xproxy/internal/protocol"
 )
@@ -16,7 +17,7 @@ type DialOpts struct {
 	Registry    *Registry
 	DeviceWait  time.Duration
 	ConnectWait time.Duration
-	Log         *log.Logger
+	Log         *xlog.Logger
 }
 
 func Dial(ctx context.Context, o DialOpts, deviceID, network, addr string) (net.Conn, error) {
@@ -31,6 +32,8 @@ func Dial(ctx context.Context, o DialOpts, deviceID, network, addr string) (net.
 		defer cancel()
 	}
 
+	log.Println("wait device:", deviceID)
+
 	sess, err := o.Registry.Wait(waitCtx, deviceID)
 	if err != nil {
 		return nil, fmt.Errorf("wait device: %w", err)
@@ -40,6 +43,8 @@ func Dial(ctx context.Context, o DialOpts, deviceID, network, addr string) (net.
 	if err != nil {
 		return nil, err
 	}
+
+	log.Println("open stream")
 
 	reqID := randomID()
 	if err := protocol.WriteLine(stream, &protocol.Envelope{
@@ -86,6 +91,7 @@ func Dial(ctx context.Context, o DialOpts, deviceID, network, addr string) (net.
 			}
 			return nil, fmt.Errorf("%s", msg)
 		}
+		log.Println("connect target success:", addr)
 		return stream, nil
 	}
 }

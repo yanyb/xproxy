@@ -3,12 +3,12 @@ package socks
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
 	"xproxy/internal/config"
 	"xproxy/internal/tunnel"
+	"xproxy/internal/xlog"
 
 	"github.com/things-go/go-socks5"
 )
@@ -20,7 +20,7 @@ type Server struct {
 	limiter *clientLimiter
 }
 
-func New(cfg *config.Server, reg *tunnel.Registry, log *log.Logger) *Server {
+func New(cfg *config.Server, reg *tunnel.Registry, log *xlog.Logger) *Server {
 	dialOpts := tunnel.DialOpts{
 		Registry:    reg,
 		DeviceWait:  cfg.DeviceWait,
@@ -31,7 +31,7 @@ func New(cfg *config.Server, reg *tunnel.Registry, log *log.Logger) *Server {
 	limiter := newClientLimiter(cfg.MaxClients, cfg.MaxClientsPerDevice)
 
 	opts := []socks5.Option{
-		socks5.WithLogger(socks5.NewLogger(log)),
+		socks5.WithLogger(log),
 		socks5.WithRule(&socks5.PermitCommand{EnableConnect: true}),
 		socks5.WithProxyIdleTimeout(cfg.ProxyIdleTimeout),
 		socks5.WithDialAndRequest(func(ctx context.Context, network, addr string, req *socks5.Request) (net.Conn, error) {

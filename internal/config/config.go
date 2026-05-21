@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"time"
+	"xproxy/internal/xlog"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,8 +19,9 @@ type Server struct {
 	HeartbeatTTL        time.Duration `yaml:"heartbeat_ttl"`
 	ProxyIdleTimeout    time.Duration `yaml:"proxy_idle_timeout"`
 	SocksLocalResolve   bool          `yaml:"socks_local_resolve"`
-	MaxClients          int           `yaml:"max_clients"`            // global cap on concurrent SOCKS clients (0 = unlimited)
-	MaxClientsPerDevice int           `yaml:"max_clients_per_device"` // cap per device (0 = unlimited)
+	MaxClients          int           `yaml:"max_clients"`
+	MaxClientsPerDevice int           `yaml:"max_clients_per_device"`
+	Log                 xlog.Config   `yaml:"log"` // 日志
 }
 
 type Device struct {
@@ -45,14 +47,13 @@ func LoadServer(path string) (*Server, error) {
 		c.ConnectWait = 30 * time.Second
 	}
 	if c.ProxyIdleTimeout == 0 {
-		// Crawler workloads see short-lived requests; 30s is enough to span typical
-		// HTTP think-time and lets idle relays be reclaimed quickly.
 		c.ProxyIdleTimeout = 30 * time.Second
 	}
 	if c.HeartbeatTTL == 0 {
-		// Without this, ServeDevice skips watchHeartbeat and silent half-open
-		// device connections accumulate in the Registry forever.
 		c.HeartbeatTTL = 90 * time.Second
+	}
+	if c.ProxyIdleTimeout == 0 {
+		c.ProxyIdleTimeout = 30
 	}
 	return &c, nil
 }

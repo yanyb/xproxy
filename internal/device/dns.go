@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -67,6 +68,7 @@ func dialTCP(ctx context.Context, network, address string, lookup HostLookup) (n
 	}
 	ips, err := lookup(ctx, host)
 	if err != nil {
+		fmt.Println("lookup host failed", host)
 		return nil, err
 	}
 	ips = preferIPv4First(ips)
@@ -78,6 +80,7 @@ func dialTCP(ctx context.Context, network, address string, lookup HostLookup) (n
 			return conn, nil
 		}
 		last = err
+		fmt.Println("connect target failed", address, err)
 	}
 	return nil, last
 }

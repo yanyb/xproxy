@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"context"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
 	"xproxy/internal/protocol"
+	"xproxy/internal/xlog"
 
 	"github.com/hashicorp/yamux"
 )
@@ -17,7 +17,7 @@ import (
 // half-open client cannot pin a goroutine indefinitely.
 const deviceRegisterBudget = 15 * time.Second
 
-func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *log.Logger) {
+func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *xlog.Logger) {
 	defer conn.Close()
 
 	// Slowloris guard: close the conn if register doesn't complete in time.
@@ -26,7 +26,7 @@ func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *
 	sess, err := yamux.Server(conn, yamuxCfg())
 	if err != nil {
 		registerTimer.Stop()
-		log.Printf("device yamux: %v", err)
+		log.Errorf("device yamux: %v", err)
 		return
 	}
 	defer sess.Close()
@@ -34,7 +34,7 @@ func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *
 	stream, err := sess.AcceptStream()
 	if err != nil {
 		registerTimer.Stop()
-		log.Printf("device accept stream: %v", err)
+		log.Errorf("device accept stream: %v", err)
 		return
 	}
 
@@ -54,7 +54,7 @@ func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *
 
 	reg.Put(id, sess)
 	defer reg.Remove(id, sess)
-	log.Printf("device %s online", id)
+	log.Infof("device %s online", id)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -69,7 +69,7 @@ func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *
 		env, err := protocol.ReadLine(br)
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("device %s control: %v", id, err)
+				log.Errorf("device %s control: %v", id, err)
 			}
 			return
 		}
@@ -86,7 +86,7 @@ func ServeDevice(conn net.Conn, reg *Registry, heartbeatTTL time.Duration, log *
 	}
 }
 
-func watchHeartbeat(ctx context.Context, conn net.Conn, ttl time.Duration, mu *sync.Mutex, last *time.Time, log *log.Logger, id string) {
+func watchHeartbeat(ctx context.Context, conn net.Conn, ttl time.Duration, mu *sync.Mutex, last *time.Time, log *xlog.Logger, id string) {
 	t := time.NewTicker(ttl / 3)
 	defer t.Stop()
 	for {
@@ -98,7 +98,7 @@ func watchHeartbeat(ctx context.Context, conn net.Conn, ttl time.Duration, mu *s
 			stale := time.Since(*last) > ttl
 			mu.Unlock()
 			if stale {
-				log.Printf("device %s heartbeat timeout", id)
+				log.Errorf("device %s heartbeat timeout", id)
 				_ = conn.Close()
 				return
 			}
