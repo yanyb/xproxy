@@ -25,9 +25,6 @@ type Config struct {
 
 // Init 使用配置列表初始化多个具名 logger。
 func New(cfg Config) (*Logger, error) {
-	cfgEnc := zap.NewProductionEncoderConfig()
-	cfgEnc.EncodeTime = zapcore.ISO8601TimeEncoder
-
 	if cfg.FilePath != "" {
 		dir := filepath.Dir(cfg.FilePath)
 		if dir != "." && dir != "" {
@@ -35,20 +32,32 @@ func New(cfg Config) (*Logger, error) {
 				return nil, err
 			}
 		}
+
+		lumberJackLogger := &lumberjack.Logger{
+			Filename:   cfg.FilePath,
+			MaxSize:    cfg.MaxSize,
+			MaxBackups: cfg.MaxBackups,
+			MaxAge:     cfg.MaxAge,
+			Compress:   cfg.Compress,
+			LocalTime:  true,
+		}
+
+		cfgEnc := zap.NewProductionEncoderConfig()
+		cfgEnc.EncodeTime = zapcore.ISO8601TimeEncoder
+
+		core := zapcore.NewCore(
+			zapcore.NewJSONEncoder(cfgEnc),
+			zapcore.AddSync(lumberJackLogger),
+			getZapLevel(cfg.Level),
+		)
+		l := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zap.PanicLevel), zap.AddCallerSkip(1))
+		return &Logger{l}, nil
 	}
 
-	lumberJackLogger := &lumberjack.Logger{
-		Filename:   cfg.FilePath,
-		MaxSize:    cfg.MaxSize,
-		MaxBackups: cfg.MaxBackups,
-		MaxAge:     cfg.MaxAge,
-		Compress:   cfg.Compress,
-		LocalTime:  true,
-	}
-
+	cfgEnc := zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
 	core := zapcore.NewCore(
-		zapcore.NewJSONEncoder(cfgEnc),
-		zapcore.AddSync(lumberJackLogger),
+		cfgEnc,
+		zapcore.AddSync(os.Stdout),
 		getZapLevel(cfg.Level),
 	)
 	l := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zap.PanicLevel), zap.AddCallerSkip(1))
